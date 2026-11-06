@@ -38,6 +38,30 @@ public class PlotBlockData {
 	private final List<String> blockList = new ArrayList<>(); // Stores the original plot blocks
 	private int blockListRestored; // counter for the next block to test
 
+	private volatile boolean regenerationCancelled;
+
+	/**
+	 * 等待当前实际写入结束，然后禁止这个实例开始后续写入。
+	 * 已提交任务在后续写入前检查此标记；已经完成的写入保留。
+	 *
+	 * @return {@code true} 表示本次首次标记取消；{@code false} 表示此前已经取消。
+	 */
+	public synchronized boolean cancelRegeneration() {
+		boolean changed = !regenerationCancelled;
+		regenerationCancelled = true;
+		return changed;
+	}
+
+	/**
+	 * 查询此快照实例是否已禁止后续还原写入。
+	 *
+	 * @return {@code true} 表示已取消，后续 {@link #restoreNextBlock()} 将直接返回
+	 *         {@code false}；{@code false} 表示尚未标记取消。
+	 */
+	public boolean isRegenerationCancelled() {
+		return regenerationCancelled;
+	}
+
 	public PlotBlockData(TownBlock townBlock) {
 
 		this.townBlock = townBlock;
@@ -113,7 +137,9 @@ public class PlotBlockData {
 	 * 
 	 * @return true if there are more blocks to check.
 	 */
-	public boolean restoreNextBlock() {
+	public synchronized boolean restoreNextBlock() {
+		if (regenerationCancelled)
+			return false;
 
 		int x, y, z, reverse;
 		int worldx = getX() * size, worldz = getZ() * size;

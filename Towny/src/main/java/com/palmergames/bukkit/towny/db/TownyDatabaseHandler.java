@@ -18,6 +18,7 @@ import com.palmergames.bukkit.towny.event.RenameResidentEvent;
 import com.palmergames.bukkit.towny.event.RenameTownEvent;
 import com.palmergames.bukkit.towny.event.town.TownPreRuinedEvent;
 import com.palmergames.bukkit.towny.event.town.TownPreUnclaimEvent;
+import com.palmergames.bukkit.towny.event.town.TownBlockPreRevertEvent;
 import com.palmergames.bukkit.towny.event.town.TownUnclaimEvent;
 import com.palmergames.bukkit.towny.event.PreDeleteNationEvent;
 import com.palmergames.bukkit.towny.exceptions.AlreadyRegisteredException;
@@ -432,8 +433,14 @@ public abstract class TownyDatabaseHandler extends TownyDataSource {
 			WorldCoordMaterialRemover.addToQueue(townBlock.getWorldCoord());
 
 		// Move the plot to be restored
-		if (townBlock.getWorld().isUsingPlotManagementRevert())
-			TownyRegenAPI.addToRegenQueueList(townBlock.getWorldCoord(), true);
+		if (townBlock.getWorld().isUsingPlotManagementRevert()) {
+			TownBlockPreRevertEvent revert = new TownBlockPreRevertEvent(town, townBlock, cause);
+			BukkitTools.fireEvent(revert);
+			if (!revert.isCancelled())
+				TownyRegenAPI.addToRegenQueueList(townBlock.getWorldCoord(), true);
+			else
+				TownyRegenAPI.cancelRegeneration(townBlock.getWorldCoord());
+		}
 
 		// Raise an event to signal the unclaim
 		BukkitTools.fireEvent(new TownUnclaimEvent(town, townBlock.getWorldCoord(), false));

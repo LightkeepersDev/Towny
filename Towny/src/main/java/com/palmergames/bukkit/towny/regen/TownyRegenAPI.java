@@ -47,6 +47,10 @@ public class TownyRegenAPI {
 	
 	// table containing snapshot data of active reversions.
 	private static final Map<String, PlotBlockData> plotChunks = new ConcurrentHashMap<>();
+
+	private static final Object regenQueueLock = new Object();
+
+	private static final Map<WorldCoord, Object> regenerationRequests = new ConcurrentHashMap<>();
 	
 	// A holder for each protection regen task
 	private static final Map<BlockLocation, ProtectionRegenTask> protectionRegenTasks = new ConcurrentHashMap<>();
@@ -71,11 +75,15 @@ public class TownyRegenAPI {
 	 * @param plotChunk PlotBlockData which finished up.
 	 */
 	public static void finishPlotBlockData(PlotBlockData plotChunk) {
+		synchronized (plotChunk) {
+			if (plotChunk.isRegenerationCancelled())
+				return;
 		TownyMessaging.sendDebugMsg("Revert on unclaim complete for " + plotChunk.getWorldName() + " " + plotChunk.getX() +"," + plotChunk.getZ());
 		removeFromRegenQueueList(plotChunk.getWorldCoord()); // Remove the WorldCoord from the queue.
-		removeFromActiveRegeneration(plotChunk); // Remove from the active map.
+		plotChunks.remove(getPlotKey(plotChunk), plotChunk);
 		deletePlotChunkSnapshot(plotChunk); // Remove from the database.
 		plotChunk.getWorldCoord().unloadChunks(); // Remove the PluginChunkTickets keeping the plotChunk loaded.
+		}
 	}
 
 	/*
@@ -111,8 +119,39 @@ public class TownyRegenAPI {
 	 * @param wc WorldCoord to add to the queue.
 	 */
 	public static void removeFromRegenQueueList(WorldCoord wc) {
-		if (regenWorldCoordList.remove(wc))
+		boolean removed;
+		synchronized (regenQueueLock) {
+			removed = regenWorldCoordList.remove(wc);
+			regenerationRequests.remove(wc);
+		}
+		if (removed)
 			TownyUniverse.getInstance().getDataSource().saveRegenList();
+	}
+
+	/**
+	 * 取消指定地块的排队和活动还原，并使已提交任务持有的实例停止后续写入。
+	 * 返回前等待该实例当前写入结束；不持有队列锁等待实例，避免与完成路径死锁。
+	 * 从排队列表移除后保存列表；地块快照和已经写入的方块保留。
+	 *
+	 * @param wc 需要取消还原的真实地块
+	 * @return 是否移除了排队或活动还原
+	 */
+	public static boolean cancelRegeneration(WorldCoord wc) {
+		PlotBlockData active;
+		boolean removed;
+		synchronized (regenQueueLock) {
+			removed = regenWorldCoordList.remove(wc);
+			regenerationRequests.remove(wc);
+			active = plotChunks.get(getPlotKey(wc));
+		}
+		if (active != null) {
+			active.cancelRegeneration();
+			plotChunks.remove(getPlotKey(active), active);
+			active.getWorldCoord().unloadChunks();
+		}
+		if (removed)
+			TownyUniverse.getInstance().getDataSource().saveRegenList();
+		return removed || active != null;
 	}
 
 	/**
@@ -121,7 +160,13 @@ public class TownyRegenAPI {
 	 * @param save true to save the regenlist.
 	 */
 	public static void addToRegenQueueList(WorldCoord wc, boolean save) {
-		if (regenWorldCoordList.add(wc) && save)
+		boolean added;
+		synchronized (regenQueueLock) {
+			added = regenWorldCoordList.add(wc);
+			if (added)
+				regenerationRequests.put(wc, new Object());
+		}
+		if (added && save)
 			TownyUniverse.getInstance().getDataSource().saveRegenList();
 	}
 
@@ -134,12 +179,27 @@ public class TownyRegenAPI {
 			if (hasActiveRegeneration(wc))
 				continue;
 			
+			Object request;
+			synchronized (regenQueueLock) {
+				if (!regenWorldCoordList.contains(wc))
+					continue;
+				request = regenerationRequests.computeIfAbsent(wc, key -> new Object());
+			}
 			// This worldCoord isn't actively regenerating, start the regeneration.
 			PlotBlockData plotData = getPlotChunkSnapshot(new TownBlock(wc.getX(), wc.getZ(), wc.getTownyWorld()));
 			if (plotData != null) {
+				// 读取快照期间若已取消，旧请求不能在取消回执之后重新激活。
+				synchronized (regenQueueLock) {
+					if (regenerationRequests.get(wc) != request || !regenWorldCoordList.contains(wc)
+							|| plotChunks.putIfAbsent(getPlotKey(plotData), plotData) != null)
+						continue;
+				}
 				// Load the chunks.
-				plotData.getWorldCoord().loadChunks();
-				addToActiveRegeneration(plotData);
+				synchronized (plotData) {
+					if (plotData.isRegenerationCancelled())
+						continue;
+					plotData.getWorldCoord().loadChunks();
+				}
 				TownyMessaging.sendDebugMsg("Revert on unclaim beginning for " + plotData.getWorldName() + " " + plotData.getX() +"," + plotData.getZ());
 			} else {
 				removeFromRegenQueueList(wc);
@@ -194,8 +254,8 @@ public class TownyRegenAPI {
 	 * @param plotChunk Chunk to remove (PlotBlockData)
 	 */
 	public static void removeFromActiveRegeneration(PlotBlockData plotChunk) {
-
-		plotChunks.remove(getPlotKey(plotChunk));
+		plotChunk.cancelRegeneration();
+		plotChunks.remove(getPlotKey(plotChunk), plotChunk);
 	}
 	
 	/**
